@@ -1,17 +1,34 @@
-name: Scan images
+name: scan-images.yaml
 on:
-  schedule:
-  # every day at 1:12AM UTC
-  - cron: '12 1 * * *'
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   scan-images:
     name: Perform vulnerability scans
+    steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
     strategy:
       fail-fast: false
       matrix:
-        # specfy location of bundle(s) to be scanned
         bundle-path:
           - 1.8/stable/kubeflow
           - 1.9/stable

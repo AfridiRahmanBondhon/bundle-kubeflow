@@ -1,181 +1,297 @@
-name: Deploy bundle and run UATs on self-hosted runners
-
+name: full-bundle-tests.yaml
 on:
-  workflow_dispatch:
-    inputs:
-      bundle-source:
-        description: 'Either `--channel <channel_name>` or `--file <bundle_file>.yaml`'
-        required: true
-      uats-branch:
-        description: Branch to run the UATs from e.g. main or track/1.7
-        required: false
-        default: main
-      microk8s-channel:
-        description: Microk8s channel e.g. 1.31-strict/stable
-        required: false
-        default: "1.31-strict/stable"
-      juju-channel:
-        description: Juju channel e.g. 3.5/stable
-        required: false
-        default: "3.6/stable"
-  workflow_call:
-    inputs:
-      bundle-source:
-        description: 'Either `--channel <channel_name>` or `--file <bundle_file>.yaml`'
-        type: string
-        required: true
-      uats-branch:
-        description: Branch to run the UATs from e.g. main or track/1.7
-        required: false
-        type: string
-        default: main
-      microk8s-channel:
-        description: Microk8s channel e.g. 1.31-strict/stable
-        required: false
-        type: string
-        default: "1.31-strict/stable"
-      juju-channel:
-        description: Juju channel e.g. 3.5/stable
-        required: false
-        type: string
-        default: "3.4/stable"
+  push:
+    branches:
+      - main
 
 jobs:
   test-bundle:
-    runs-on: [self-hosted, linux, X64, two-xlarge]
+    runs-on:
+      - self-hosted
+      - linux
+      - X64
+      - two-xlarge
     steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
       - uses: actions/checkout@v3
-      - name: Parse and enable DNS server
-        id: dns-name
-        run: |
-          dns_server=$(grep -oPm1 'Current DNS Server: \K[^\s]+' <<< "$(resolvectl status)")
+      - id: dns-name
+        name: Parse and enable DNS server
+        run: 'dns_server=$(grep -oPm1 ''Current DNS Server: \K[^\s]+'' <<< "$(resolvectl
+          status)")
+
           echo "Using following DNS Server: $dns_server"
 
-          echo "MY_ADDONS=hostpath-storage ingress dns:$dns_server rbac registry metallb:'10.64.140.43-10.64.140.49,192.168.0.105-192.168.0.111'" >> $GITHUB_OUTPUT
 
-      # This is needed in order to configure internet connection for self-hosted runner.
-      # Source: https://discourse.canonical.com/t/introducing-aproxy-a-transparent-proxy-for-github-self-hosted-runners/2566
+          echo "MY_ADDONS=hostpath-storage ingress dns:$dns_server rbac registry metallb:''10.64.140.43-10.64.140.49,192.168.0.105-192.168.0.111''"
+          >> $GITHUB_OUTPUT
+
+          '
+      - id: measurement-3
+        name: Record Measurement After Parse and enable DNS server
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Parse and enable DNS server
+          task: get-measurement
       - name: Setup aproxy
-        run: |
-          sudo snap install aproxy --edge
-          sudo snap set aproxy proxy=squid.internal:3128
-          sudo nft -f - << EOF
-          define default-ip = $(ip route get $(ip route show 0.0.0.0/0 | grep -oP 'via \K\S+') | grep -oP 'src \K\S+')
-          define private-ips = { 10.0.0.0/8, 127.0.0.1/8, 172.16.0.0/12, 192.168.0.0/16 }
-          table ip aproxy
-          flush table ip aproxy
-          table ip aproxy {
-                chain prerouting {
-                        type nat hook prerouting priority dstnat; policy accept;
-                        ip daddr != \$private-ips tcp dport { 80, 443 } counter dnat to \$default-ip:8443
-                }
-
-                chain output {
-                        type nat hook output priority -100; policy accept;
-                        ip daddr != \$private-ips tcp dport { 80, 443 } counter dnat to \$default-ip:8443
-                }
-          }
-          EOF
-
+        run: "sudo snap install aproxy --edge\nsudo snap set aproxy proxy=squid.internal:3128\n\
+          sudo nft -f - << EOF\ndefine default-ip = $(ip route get $(ip route show\
+          \ 0.0.0.0/0 | grep -oP 'via \\K\\S+') | grep -oP 'src \\K\\S+')\ndefine\
+          \ private-ips = { 10.0.0.0/8, 127.0.0.1/8, 172.16.0.0/12, 192.168.0.0/16\
+          \ }\ntable ip aproxy\nflush table ip aproxy\ntable ip aproxy {\n      chain\
+          \ prerouting {\n              type nat hook prerouting priority dstnat;\
+          \ policy accept;\n              ip daddr != \\$private-ips tcp dport { 80,\
+          \ 443 } counter dnat to \\$default-ip:8443\n      }\n\n      chain output\
+          \ {\n              type nat hook output priority -100; policy accept;\n\
+          \              ip daddr != \\$private-ips tcp dport { 80, 443 } counter\
+          \ dnat to \\$default-ip:8443\n      }\n}\nEOF\n"
+      - id: measurement-5
+        name: Record Measurement After Setup aproxy
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Setup aproxy
+          task: get-measurement
       - name: Install tox
-        run: |
-          pip install tox
+        run: 'pip install tox
 
+          '
+      - id: measurement-7
+        name: Record Measurement After Install tox
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Install tox
+          task: get-measurement
       - name: Setup operator environment
         uses: charmed-kubernetes/actions-operator@main
         with:
-          provider: microk8s
           channel: ${{ inputs.microk8s-channel }}
-          juju-channel: ${{ inputs.juju-channel }}
           charmcraft-channel: latest/candidate
+          juju-channel: ${{ inputs.juju-channel }}
           microk8s-addons: ${{ steps.dns-name.outputs.MY_ADDONS }}
-
+          provider: microk8s
       - name: Wait for microk8s to be ready and configure .kube/config
-        run: |
-          sudo microk8s status --wait-ready --timeout 150
+        run: 'sudo microk8s status --wait-ready --timeout 150
+
           sg microk8s -c "mkdir -p ~/.kube"
+
           sudo microk8s config > ~/.kube/config
 
+          '
+      - id: measurement-10
+        name: Record Measurement After Wait for microk8s to be ready and configure
+          .kube/config
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Wait for microk8s to be ready and configure .kube/config
+          task: get-measurement
       - name: Show all pods status
-        run: |
-          sudo microk8s kubectl get pods --all-namespaces
+        run: 'sudo microk8s kubectl get pods --all-namespaces
 
+          '
+      - id: measurement-12
+        name: Record Measurement After Show all pods status
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Show all pods status
+          task: get-measurement
       - name: Increase file system limits
-        run: |
-          sudo sysctl fs.inotify.max_user_instances=1280
+        run: 'sudo sysctl fs.inotify.max_user_instances=1280
+
           sudo sysctl fs.inotify.max_user_watches=655360
 
+          '
+      - id: measurement-14
+        name: Record Measurement After Increase file system limits
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Increase file system limits
+          task: get-measurement
       - name: Configure Juju model
-        run: |
-          sg microk8s -c "juju add-model kubeflow --config default-series=focal --config automatically-retry-hooks=true"
+        run: 'sg microk8s -c "juju add-model kubeflow --config default-series=focal
+          --config automatically-retry-hooks=true"
+
           sg microk8s -c "juju model-config"
+
           sg microk8s -c "juju status"
 
-      - name: Get release from bundle-source input
-        id: get-release-from-bundle-source
-        run: python scripts/get_release_from_bundle_source.py "${{ inputs.bundle-source }}"
-
-      - name: Get bundle test path for ${{ steps.get-release-from-bundle-source.outputs.release }}
-        id: bundle-test-path
-        run: python scripts/get_bundle_test_path.py ${{ steps.get-release-from-bundle-source.outputs.release }}
-
+          '
+      - id: measurement-16
+        name: Record Measurement After Configure Juju model
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Configure Juju model
+          task: get-measurement
+      - id: get-release-from-bundle-source
+        name: Get release from bundle-source input
+        run: python scripts/get_release_from_bundle_source.py "${{ inputs.bundle-source
+          }}"
+      - id: measurement-18
+        name: Record Measurement After Get release from bundle-source input
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get release from bundle-source input
+          task: get-measurement
+      - id: bundle-test-path
+        name: Get bundle test path for ${{ steps.get-release-from-bundle-source.outputs.release
+          }}
+        run: python scripts/get_bundle_test_path.py ${{ steps.get-release-from-bundle-source.outputs.release
+          }}
+      - id: measurement-20
+        name: Record Measurement After Get bundle test path for ${{ steps.get-release-from-bundle-source.outputs.release
+          }}
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get bundle test path for ${{ steps.get-release-from-bundle-source.outputs.release
+            }}
+          task: get-measurement
       - name: Run bundle tests
-        run: |
-          eval "$(pyenv init -)"
-          export BUNDLE_TEST_PATH=${{ steps.bundle-test-path.outputs.bundle_test_path }}
+        run: 'eval "$(pyenv init -)"
+
+          export BUNDLE_TEST_PATH=${{ steps.bundle-test-path.outputs.bundle_test_path
+          }}
+
           export GH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
           sg microk8s -c "tox -e full_bundle_tests -- ${{ inputs.bundle-source }}"
 
+          '
+      - id: measurement-22
+        name: Record Measurement After Run bundle tests
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Run bundle tests
+          task: get-measurement
       - name: Checkout Kubeflow UATs
-        run: |
-          git clone https://github.com/canonical/charmed-kubeflow-uats.git ~/charmed-kubeflow-uats
+        run: 'git clone https://github.com/canonical/charmed-kubeflow-uats.git ~/charmed-kubeflow-uats
+
           cd ~/charmed-kubeflow-uats
+
           git checkout ${{ inputs.uats-branch }}
+
+          '
+      - id: measurement-24
+        name: Record Measurement After Checkout Kubeflow UATs
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Checkout Kubeflow UATs
+          task: get-measurement
       - name: Run UATs
-        run: |
-          eval "$(pyenv init -)"
+        run: 'eval "$(pyenv init -)"
+
           sg microk8s -c "tox -c ~/charmed-kubeflow-uats/ -e kubeflow-local"
 
-      - name: Save debug artifacts
+          '
+      - id: measurement-26
+        name: Record Measurement After Run UATs
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Run UATs
+          task: get-measurement
+      - if: always()
+        name: Save debug artifacts
         uses: canonical/kubeflow-ci/actions/dump-charm-debug-artifacts@main
-        if: always()
-
-      - name: Dump Aproxy logs on failure
-        if: failure() || cancelled()
+      - if: failure() || cancelled()
+        name: Dump Aproxy logs on failure
         run: sudo snap logs aproxy.aproxy -n=all
+      - id: measurement-29
+        name: Record Measurement After Dump Aproxy logs on failure
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Dump Aproxy logs on failure
+          task: get-measurement
+      - if: always()
+        name: Run connectivity check
+        run: 'sg microk8s -c "curl --max-time 10 --connect-timeout 10 http://10.64.140.43.nip.io"
 
-      - name: Run connectivity check
-        if: always()
-        run: |
-          sg microk8s -c "curl --max-time 10 --connect-timeout 10 http://10.64.140.43.nip.io"
+          '
+      - id: measurement-31
+        name: Record Measurement After Run connectivity check
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Run connectivity check
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Dump Juju/k8s logs on failure
+        run: 'sg microk8s -c "juju status"
 
-      - name: Dump Juju/k8s logs on failure
-        if: failure() || cancelled()
-        run: |
-          sg microk8s -c "juju status"
 
           echo "Dumping k8s logs"
+
           sudo microk8s kubectl get all --all-namespaces
 
-      - name: Dump juju debug-log on failure
-        if: failure() || cancelled()
-        run: |
-          sg microk8s -c "juju debug-log --replay --no-tail"
+          '
+      - id: measurement-33
+        name: Record Measurement After Dump Juju/k8s logs on failure
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Dump Juju/k8s logs on failure
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Dump juju debug-log on failure
+        run: 'sg microk8s -c "juju debug-log --replay --no-tail"
 
-      - name: Descript all pods
-        if: failure() || cancelled()
-        run: |
-          sudo microk8s kubectl describe pods --all-namespaces
+          '
+      - id: measurement-35
+        name: Record Measurement After Dump juju debug-log on failure
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Dump juju debug-log on failure
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Descript all pods
+        run: 'sudo microk8s kubectl describe pods --all-namespaces
 
-      - name: Get logs from failed pods
-        if: failure() || cancelled()
-        run: |
-          POD_LIST=$(sudo microk8s kubectl get pods --all-namespaces -o 'custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,CONTAINERS:.status.containerStatuses[*].ready' | awk '$3 == "false" {print $1,$2}')
-
-          if [ -n "$POD_LIST" ]; then
-            echo "Actual Logs"
-            while read -r POD NAMESPACE; do
-              echo "\n\n\nPod: $POD"
-              sudo microk8s kubectl logs -n $NAMESPACE $POD
-            done <<< "$POD_LIST"
-          fi
+          '
+      - id: measurement-37
+        name: Record Measurement After Descript all pods
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Descript all pods
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Get logs from failed pods
+        run: "POD_LIST=$(sudo microk8s kubectl get pods --all-namespaces -o 'custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace,CONTAINERS:.status.containerStatuses[*].ready'\
+          \ | awk '$3 == \"false\" {print $1,$2}')\n\nif [ -n \"$POD_LIST\" ]; then\n\
+          \  echo \"Actual Logs\"\n  while read -r POD NAMESPACE; do\n    echo \"\\\
+          n\\n\\nPod: $POD\"\n    sudo microk8s kubectl logs -n $NAMESPACE $POD\n\
+          \  done <<< \"$POD_LIST\"\nfi\n"
+      - id: measurement-39
+        name: Record Measurement After Get logs from failed pods
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get logs from failed pods
+          task: get-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json

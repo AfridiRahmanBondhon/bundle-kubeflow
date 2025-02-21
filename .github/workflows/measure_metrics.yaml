@@ -1,0 +1,144 @@
+name: measure_metrics.yml
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  analyze:
+    name: Code Metrics Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.x
+      - name: Install dependencies
+        run: 'python -m pip install --upgrade pip
+
+          pip install radon lizard pylint mccabe xenon pycodestyle cognitive-complexity
+          cloc scc
+
+          '
+      - id: measurement-4
+        name: Record Measurement After Install dependencies
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Install dependencies
+          task: get-measurement
+      - name: Analyze with Radon
+        run: 'echo "=== Cyclomatic Complexity ===" > metrics_report.txt
+
+          radon cc . --show-complexity --average >> metrics_report.txt
+
+
+          echo -e "\n=== Maintainability Index ===" >> metrics_report.txt
+
+          radon mi . --show >> metrics_report.txt
+
+
+          echo -e "\n=== Raw Metrics ===" >> metrics_report.txt
+
+          radon raw . --summary >> metrics_report.txt
+
+
+          echo -e "\n=== Halstead Metrics ===" >> metrics_report.txt
+
+          radon hal . >> metrics_report.txt
+
+          '
+      - id: measurement-6
+        name: Record Measurement After Analyze with Radon
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Analyze with Radon
+          task: get-measurement
+      - name: Analyze with Lizard
+        run: 'echo -e "\n=== Detailed Code Metrics ===" >> metrics_report.txt
+
+          lizard . --CCN 10 --length 100 --arguments 5 --extension duplicate --modified --working_threads 1 || true >> metrics_report.txt
+          '
+      - id: measurement-8
+        name: Record Measurement After Analyze with Lizard
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Analyze with Lizard
+          task: get-measurement
+      - name: Analyze with Pylint
+        run: 'echo -e "\n=== Code Quality Metrics ===" >> metrics_report.txt
+
+          pylint --output-format=text . || true >> metrics_report.txt
+
+          '
+      - id: measurement-10
+        name: Record Measurement After Analyze with Pylint
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Analyze with Pylint
+          task: get-measurement
+      - name: Check complexity thresholds with Xenon
+        run: 'echo -e "\n=== Complexity Thresholds ===" >> metrics_report.txt
+
+          xenon --max-absolute A --max-modules A --max-average A . || true >> metrics_report.txt
+
+          '
+      - id: measurement-12
+        name: Record Measurement After Check complexity thresholds with Xenon
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Check complexity thresholds with Xenon
+          task: get-measurement
+      - name: Generate detailed reports
+        run: 'mkdir -p metrics
+
+          # JSON reports
+
+          radon cc . --json > metrics/complexity.json
+
+          radon raw . --json > metrics/raw_metrics.json
+
+          radon hal . --json > metrics/halstead.json
+
+          lizard . --xml > metrics/lizard_report.xml
+
+          cp metrics_report.txt metrics/full_report.txt
+
+          '
+      - id: measurement-14
+        name: Record Measurement After Generate detailed reports
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Generate detailed reports
+          task: get-measurement
+      - name: Upload metrics results
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-metrics
+          path: metrics/
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json

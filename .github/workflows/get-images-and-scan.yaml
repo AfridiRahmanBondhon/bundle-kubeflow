@@ -1,148 +1,251 @@
-name: Get and scan images, upload vulnerability reports
+name: get-images-and-scan.yaml
 on:
-  workflow_call:
-    inputs:
-      bundle-directory:
-        description: |
-          The directory where the bundle.yaml to be scanned is placed inside releases/ in this repository.
-          An example input would be 1.9/stable/, which is placed inside releases/ at the root of this repository.
-        required: true
-        type: string
+  push:
+    branches:
+      - main
 
 jobs:
+  generate-and-upload-summary:
+    if: always()
+    name: Generate and upload summary of vulnerability reports
+    needs: scan-images-upload-individual-reports
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
+      - id: scans-out-dir
+        name: Make directory to temporarily store scans
+        run: 'SCANS_OUT_DIR="/tmp/trivy-reports"
+
+          mkdir -p ${SCANS_OUT_DIR}-${{ needs.scan-images-upload-individual-reports.outputs.release-track
+          }}/
+
+          echo "scans-out-dir=$SCANS_OUT_DIR" >> $GITHUB_OUTPUT
+
+          '
+      - id: measurement-2
+        name: Record Measurement After Make directory to temporarily store scans
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Make directory to temporarily store scans
+          task: get-measurement
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: ${{ steps.scans-out-dir.outputs.scans-out-dir }}-${{ needs.scan-images-upload-individual-reports.outputs.release-track
+            }}/
+          pattern: ${{ needs.scan-images-upload-individual-reports.outputs.release-track
+            }}*.json
+      - name: Clone canonical/kubeflow-ci
+        uses: actions/checkout@v4
+        with:
+          path: kubeflow-ci
+          ref: main
+          repository: canonical/kubeflow-ci.git
+          sparse-checkout: scripts/images/
+      - name: Generate summary of reports
+        run: 'export date=$(date ''+%Y-%m-%d-%H-%M-%S'')
+
+          ./kubeflow-ci/scripts/images/get-summary.py --report-path ${{ steps.scans-out-dir.outputs.scans-out-dir
+          }}-${{ needs.scan-images-upload-individual-reports.outputs.release-track
+          }}/ --print-header > /tmp/scan-summary-${date}-${{ needs.scan-images-upload-individual-reports.outputs.release-track
+          }}.csv
+
+          '
+      - id: measurement-6
+        name: Record Measurement After Generate summary of reports
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Generate summary of reports
+          task: get-measurement
+      - name: Upload summary report
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-trivy-report-${{ needs.scan-images-upload-individual-reports.outputs.release-track
+            }}
+          path: /tmp/scan-summary-*.csv
+          retention-days: 90
+      - name: Upload individual reports
+        uses: actions/upload-artifact/merge@v4
+        with:
+          delete-merged: true
+          name: ${{ needs.scan-images-upload-individual-reports.outputs.release-track
+            }}-individual-reports
+          pattern: ${{ needs.scan-images-upload-individual-reports.outputs.release-track
+            }}*.json
+          retention-days: 90
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+    strategy:
+      fail-fast: false
   get-images:
     name: Get images
-    runs-on: ubuntu-22.04
     outputs:
       images-array: ${{ steps.set-images-array.outputs.images-array }}
+    runs-on: ubuntu-22.04
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run get-all-images.py
+        run: "pip3 install -r scripts/requirements.txt\n# The get_all_images.py does\
+          \ not provide a way to include extra repositories to fetch images from.\n\
+          # In order to include the resource-dispatcher and the namespace-node-affinity\
+          \ charms in the scans,\n# they can be passed using the --append-images argument.\n\
+          if [[ ${{ inputs.bundle-directory }}  == *\"1.8\"* ]]; then\n  echo 'charmedkubeflow/resource-dispatcher:1.0-22.04'\
+          \ >> /tmp/extra-images.txt\n  echo 'charmedkubeflow/namespace-node-affinity:90dde45ab265af91369d09a377a26034bc453a5d'\
+          \ >> /tmp/extra-images.txt\nelse\n  echo 'charmedkubeflow/resource-dispatcher:2.0-22.04'\
+          \ >> /tmp/extra-images.txt\n  echo 'charmedkubeflow/namespace-node-affinity:2.2.0'\
+          \ >> /tmp/extra-images.txt\nfi\npython3 scripts/get_all_images.py releases/${{\
+          \ inputs.bundle-directory }}/bundle.yaml --append-images /tmp/extra-images.txt\
+          \ > /tmp/images_list.txt\n"
+      - id: measurement-3
+        name: Record Measurement After Run get-all-images.py
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Run get-all-images.py
+          task: get-measurement
+      - id: set-images-array
+        name: Generate an array of images
+        run: '# Output the images as an array that can be used in the matrix strategy
+          for the scan images job
 
-    - name: Run get-all-images.py
-      run: |
-        pip3 install -r scripts/requirements.txt
-        # The get_all_images.py does not provide a way to include extra repositories to fetch images from.
-        # In order to include the resource-dispatcher and the namespace-node-affinity charms in the scans,
-        # they can be passed using the --append-images argument.
-        if [[ ${{ inputs.bundle-directory }}  == *"1.8"* ]]; then
-          echo 'charmedkubeflow/resource-dispatcher:1.0-22.04' >> /tmp/extra-images.txt
-          echo 'charmedkubeflow/namespace-node-affinity:90dde45ab265af91369d09a377a26034bc453a5d' >> /tmp/extra-images.txt
-        else
-          echo 'charmedkubeflow/resource-dispatcher:2.0-22.04' >> /tmp/extra-images.txt
-          echo 'charmedkubeflow/namespace-node-affinity:2.2.0' >> /tmp/extra-images.txt
-        fi
-        python3 scripts/get_all_images.py releases/${{ inputs.bundle-directory }}/bundle.yaml --append-images /tmp/extra-images.txt > /tmp/images_list.txt
+          # This array contains all the images from /tmp/image_list.txt
 
-    - name: Generate an array of images
-      id: set-images-array
-      run: | 
-        # Output the images as an array that can be used in the matrix strategy for the scan images job
-        # This array contains all the images from /tmp/image_list.txt
-        sudo snap install jq
-        IMAGES=$(cat /tmp/images_list.txt | jq -R -s -c 'split("\n")[:-1]')
-        echo "images-array=$IMAGES" >> $GITHUB_OUTPUT
+          sudo snap install jq
 
+          IMAGES=$(cat /tmp/images_list.txt | jq -R -s -c ''split("\n")[:-1]'')
+
+          echo "images-array=$IMAGES" >> $GITHUB_OUTPUT
+
+          '
+      - id: measurement-5
+        name: Record Measurement After Generate an array of images
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Generate an array of images
+          task: get-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
   scan-images-upload-individual-reports:
     name: Run vulnerability scans and upload reports
-    runs-on: ubuntu-22.04
     needs: get-images
     outputs:
       release-track: ${{ steps.release-track.outputs.release-track }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
+      - id: release-track
+        name: Generate release track
+        run: 'RELEASE_TRACK=$(echo ${{ inputs.bundle-directory }} | sed ''s/\//-/g'')
+
+          echo "release-track=$RELEASE_TRACK" >> $GITHUB_OUTPUT
+
+          '
+      - id: measurement-2
+        name: Record Measurement After Generate release track
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Generate release track
+          task: get-measurement
+      - id: report-path
+        name: Generate report path
+        run: 'FILENAME=$(echo ${{ matrix.image }} | sed ''s/:/-/g; s/\//-/g; s/\./-/g'')
+
+          PATH="${{ steps.release-track.outputs.release-track}}-${FILENAME}.json"
+
+          echo "report-path=$PATH" >> $GITHUB_OUTPUT
+
+          '
+      - id: measurement-4
+        name: Record Measurement After Generate report path
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Generate report path
+          task: get-measurement
+      - env:
+          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
+          TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db:1
+        name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.25.0
+        with:
+          format: json
+          ignore-unfixed: true
+          image-ref: ${{ matrix.image }}
+          output: ${{ steps.report-path.outputs.report-path }}
+          scan-type: image
+          severity: CRITICAL,HIGH
+          skip-files: /bin/pebble,/usr/bin/pebble,usr/bin/pebble,bin/pebble
+      - name: Upload Trivy reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.report-path.outputs.report-path }}
+          path: ${{ steps.report-path.outputs.report-path }}
+      - name: Print vulnerability report
+        run: cat ${{ steps.report-path.outputs.report-path }}
+      - id: measurement-8
+        name: Record Measurement After Print vulnerability report
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Print vulnerability report
+          task: get-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
     strategy:
       fail-fast: false
       matrix:
         image: ${{ fromJSON(needs.get-images.outputs.images-array) }}
-    steps:
-    - name: Generate release track
-      id: release-track
-      run: |
-        RELEASE_TRACK=$(echo ${{ inputs.bundle-directory }} | sed 's/\//-/g')
-        echo "release-track=$RELEASE_TRACK" >> $GITHUB_OUTPUT
-
-    - name: Generate report path
-      id: report-path
-      run: |
-        FILENAME=$(echo ${{ matrix.image }} | sed 's/:/-/g; s/\//-/g; s/\./-/g')
-        PATH="${{ steps.release-track.outputs.release-track}}-${FILENAME}.json"
-        echo "report-path=$PATH" >> $GITHUB_OUTPUT
-
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@0.25.0
-      # Workaround for https://github.com/aquasecurity/trivy-action/issues/389
-      env:
-        TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
-        TRIVY_JAVA_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-java-db:1
-      with:
-        image-ref: ${{ matrix.image }}
-        scan-type: image
-        output: '${{ steps.report-path.outputs.report-path }}'
-        format: 'json'
-        ignore-unfixed: true
-        severity: 'CRITICAL,HIGH'
-        # NOTE: pebble is flagged with a HIGH vuln because of golang.org/x/crypto
-        # CVE-2021-43565, CVE-2022-27191
-        skip-files: '/bin/pebble,/usr/bin/pebble,usr/bin/pebble,bin/pebble'
-
-    - name: Upload Trivy reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ steps.report-path.outputs.report-path }}
-        path: ${{ steps.report-path.outputs.report-path }}
-
-    - name: Print vulnerability report
-      run: cat ${{ steps.report-path.outputs.report-path }}
-
-  generate-and-upload-summary:
-    name: Generate and upload summary of vulnerability reports
-    runs-on: ubuntu-22.04
-    needs: scan-images-upload-individual-reports
-    # This always() is required as we always want to generate and upload summaries even
-    # if the previous job had one or more failures.
-    if: always()
-    strategy:
-      fail-fast: false
-    steps:
-    - name: Make directory to temporarily store scans
-      id: scans-out-dir
-      run: |
-        SCANS_OUT_DIR="/tmp/trivy-reports"
-        mkdir -p ${SCANS_OUT_DIR}-${{ needs.scan-images-upload-individual-reports.outputs.release-track }}/
-        echo "scans-out-dir=$SCANS_OUT_DIR" >> $GITHUB_OUTPUT
-
-    - name: Download all artefacts
-      uses: actions/download-artifact@v4
-      with:
-        path: ${{ steps.scans-out-dir.outputs.scans-out-dir }}-${{ needs.scan-images-upload-individual-reports.outputs.release-track }}/
-        pattern: ${{ needs.scan-images-upload-individual-reports.outputs.release-track }}*.json
-        merge-multiple: true
-
-    - name: Clone canonical/kubeflow-ci
-      uses: actions/checkout@v4
-      with:
-        repository: canonical/kubeflow-ci.git
-        sparse-checkout: scripts/images/
-        ref: main
-        path: kubeflow-ci
-
-    - name: Generate summary of reports
-      run: |
-        export date=$(date '+%Y-%m-%d-%H-%M-%S')
-        ./kubeflow-ci/scripts/images/get-summary.py --report-path ${{ steps.scans-out-dir.outputs.scans-out-dir }}-${{ needs.scan-images-upload-individual-reports.outputs.release-track }}/ --print-header > /tmp/scan-summary-${date}-${{ needs.scan-images-upload-individual-reports.outputs.release-track }}.csv
-
-    - name: Upload summary report
-      uses: actions/upload-artifact@v4
-      with:
-        name: summary-trivy-report-${{ needs.scan-images-upload-individual-reports.outputs.release-track }}
-        path: /tmp/scan-summary-*.csv
-        retention-days: 90
-
-    - name: Upload individual reports
-      uses: actions/upload-artifact/merge@v4
-      with:
-        name: ${{ needs.scan-images-upload-individual-reports.outputs.release-track }}-individual-reports
-        pattern: '${{ needs.scan-images-upload-individual-reports.outputs.release-track }}*.json'
-        retention-days: 90
-        delete-merged: true

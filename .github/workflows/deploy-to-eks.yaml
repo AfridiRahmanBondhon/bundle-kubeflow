@@ -1,177 +1,376 @@
-name: Create EKS cluster, deploy CKF and run bundle test
+name: deploy-to-eks.yaml
 on:
-  workflow_dispatch: # This event allows manual triggering from the Github UI
-    inputs:
-      bundle_version:
-        description: 'Comma-separated list of bundle versions e.g. 1.8, 1.9, latest. Make sure that the corresponding K8s version is supported by the cloud.'
-        default: '1.8, 1.9, latest'
-        required: true
-      k8s_version:
-        description: 'Kubernetes version to be used for the AKS cluster'
-        required: false
-      uats_branch:
-        description: 'Branch to run the UATs from e.g. main or track/1.9. By default, this is defined by the dependencies.yaml file.'
-        required: false
-  schedule:
-    - cron: "23 0 * * 2"
-jobs:
-  preprocess-input:
-    runs-on: ubuntu-24.04
-    outputs:
-      processed_bundle_versions: ${{ steps.process_bundle_versions.outputs.bundle_versions }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  push:
+    branches:
+      - main
 
-      - name: Install CLI tools
-        run: |
-          sudo snap install yq
-          
-      - name: Process bundle versions
-        id: process_bundle_versions
-        run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-              # Use `tr` to remove new lines as a workaround to:
-              # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strngs
-              bundle_versions=$(yq '. | keys' .github/dependencies.yaml -o=json | tr -d '\n')
-              echo "bundle_versions=${bundle_versions}"
-              echo "bundle_versions=${bundle_versions}" >> $GITHUB_OUTPUT
-          else
-              python scripts/gh-actions/parse_versions.py "${{ inputs.bundle_version }}"
-          fi
-        
+jobs:
+  delete-unattached-volumes:
+    if: always()
+    needs:
+      - deploy-ckf-to-eks
+    secrets: inherit
+    steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+    uses: ./.github/workflows/delete-aws-volumes.yaml
+    with:
+      region: eu-central-1
   deploy-ckf-to-eks:
     needs: preprocess-input
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        bundle_version: ${{ fromJSON(needs.preprocess-input.outputs.processed_bundle_versions) }}
-      fail-fast: false
-
     steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Run YAML to Github Output Action
-        id: yaml-output
+      - id: yaml-output
+        name: Run YAML to Github Output Action
         uses: christian-ci/action-yaml-github-output@v2
         with:
-          file_path: ".github/dependencies.yaml"
+          file_path: .github/dependencies.yaml
           main_key: ${{ matrix.bundle_version }}
-
       - name: Update ENV variables from inputs if available
-        run: |
-          K8S_VERSION=${{ inputs.k8s_version || env.K8S_VERSION }}
+        run: 'K8S_VERSION=${{ inputs.k8s_version || env.K8S_VERSION }}
+
           echo "K8S_VERSION=${K8S_VERSION}" >> $GITHUB_ENV
+
           UATS_BRANCH=${{ inputs.uats_branch || env.UATS_BRANCH }}
+
           echo "UATS_BRANCH=${UATS_BRANCH}" >> $GITHUB_ENV
 
+          '
+      - id: measurement-4
+        name: Record Measurement After Update ENV variables from inputs if available
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Update ENV variables from inputs if available
+          task: get-measurement
       - name: Install CLI tools
-        run: |
-          pip install tox
+        run: 'pip install tox
+
           sudo snap install juju --channel=${{ env.JUJU_VERSION }}/stable
+
           sudo snap install charmcraft --classic
+
           juju version
 
-      - name: Configure AWS Credentials
-        env:
+          '
+      - id: measurement-6
+        name: Record Measurement After Install CLI tools
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Install CLI tools
+          task: get-measurement
+      - env:
           AWS_ACCESS_KEY_ID: ${{ secrets.BUNDLE_KUBEFLOW_EKS_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.BUNDLE_KUBEFLOW_EKS_AWS_SECRET_ACCESS_KEY }}
-        run: |
-          aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-          aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
-          aws configure set default.region eu-central-1
-      
-      - name: Install kubectl
-        run: |
-          sudo snap install kubectl --classic --channel=${{ env.K8S_VERSION }}/stable
-          mkdir ~/.kube
-          kubectl version --client
-      
-      - name: Install eksctl
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
-          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
-          sudo mv /tmp/eksctl /usr/local/bin
-          eksctl version
-      
-      - name: Create cluster
-        run: |
-          VERSION=${{ matrix.bundle_version }}
-          VERSION_WITHOUT_DOT="${VERSION//.}"
-          yq e ".metadata.name |= \"kubeflow-test-$VERSION_WITHOUT_DOT\"" -i .github/cluster.yaml
-          yq e ".metadata.version |= \"${{ env.K8S_VERSION }}\"" -i .github/cluster.yaml
-          eksctl create cluster -f .github/cluster.yaml
-          kubectl get nodes
-      
-      - name: Setup juju
-        run: |
-          # Call juju bin directly as a workaround to https://bugs.launchpad.net/juju/+bug/2007575
-          /snap/juju/current/bin/juju add-k8s eks --client
-          juju bootstrap eks kubeflow-controller
-          juju add-model kubeflow
-      
-      - name: Test bundle deployment
-        run: |
-          tox -vve test_bundle_deployment-${{ matrix.bundle_version }} -- --model kubeflow --keep-models -vv -s
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BUNDLE_KUBEFLOW_EKS_AWS_SECRET_ACCESS_KEY
+            }}
+        name: Configure AWS Credentials
+        run: 'aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
 
+          aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+
+          aws configure set default.region eu-central-1
+
+          '
+      - id: measurement-8
+        name: Record Measurement After Configure AWS Credentials
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Configure AWS Credentials
+          task: get-measurement
+      - name: Install kubectl
+        run: 'sudo snap install kubectl --classic --channel=${{ env.K8S_VERSION }}/stable
+
+          mkdir ~/.kube
+
+          kubectl version --client
+
+          '
+      - id: measurement-10
+        name: Record Measurement After Install kubectl
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Install kubectl
+          task: get-measurement
+      - name: Install eksctl
+        run: 'sudo apt-get update
+
+          sudo apt-get install -y unzip
+
+          curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname
+          -s)_amd64.tar.gz" | tar xz -C /tmp
+
+          sudo mv /tmp/eksctl /usr/local/bin
+
+          eksctl version
+
+          '
+      - id: measurement-12
+        name: Record Measurement After Install eksctl
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Install eksctl
+          task: get-measurement
+      - name: Create cluster
+        run: 'VERSION=${{ matrix.bundle_version }}
+
+          VERSION_WITHOUT_DOT="${VERSION//.}"
+
+          yq e ".metadata.name |= \"kubeflow-test-$VERSION_WITHOUT_DOT\"" -i .github/cluster.yaml
+
+          yq e ".metadata.version |= \"${{ env.K8S_VERSION }}\"" -i .github/cluster.yaml
+
+          eksctl create cluster -f .github/cluster.yaml
+
+          kubectl get nodes
+
+          '
+      - id: measurement-14
+        name: Record Measurement After Create cluster
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Create cluster
+          task: get-measurement
+      - name: Setup juju
+        run: '# Call juju bin directly as a workaround to https://bugs.launchpad.net/juju/+bug/2007575
+
+          /snap/juju/current/bin/juju add-k8s eks --client
+
+          juju bootstrap eks kubeflow-controller
+
+          juju add-model kubeflow
+
+          '
+      - id: measurement-16
+        name: Record Measurement After Setup juju
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Setup juju
+          task: get-measurement
+      - name: Test bundle deployment
+        run: 'tox -vve test_bundle_deployment-${{ matrix.bundle_version }} -- --model
+          kubeflow --keep-models -vv -s
+
+          '
+      - id: measurement-18
+        name: Record Measurement After Test bundle deployment
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Test bundle deployment
+          task: get-measurement
       - name: Run Kubeflow UATs
-        run: |
-          git clone https://github.com/canonical/charmed-kubeflow-uats.git ~/charmed-kubeflow-uats
+        run: 'git clone https://github.com/canonical/charmed-kubeflow-uats.git ~/charmed-kubeflow-uats
+
           cd ~/charmed-kubeflow-uats
+
           git checkout ${{ env.UATS_BRANCH }}
+
           tox -e kubeflow-remote
 
-      # On failure, capture debugging resources
-      - name: Save debug artifacts
+          '
+      - id: measurement-20
+        name: Record Measurement After Run Kubeflow UATs
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Run Kubeflow UATs
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Save debug artifacts
         uses: canonical/kubeflow-ci/actions/dump-charm-debug-artifacts@main
-        if: failure() || cancelled()
-
-      # On failure, capture debugging resources
-      - name: Get juju status
+      - if: failure() || cancelled()
+        name: Get juju status
         run: juju status
-        if: failure() || cancelled()
-
-      - name: Get juju debug logs
+      - id: measurement-23
+        name: Record Measurement After Get juju status
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get juju status
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Get juju debug logs
         run: juju debug-log --replay --no-tail
-        if: failure() || cancelled()
-
-      - name: Get all kubernetes resources
+      - id: measurement-25
+        name: Record Measurement After Get juju debug logs
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get juju debug logs
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Get all kubernetes resources
         run: kubectl get all -A
-        if: failure() || cancelled()
+      - id: measurement-27
+        name: Record Measurement After Get all kubernetes resources
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get all kubernetes resources
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Get logs from pods with status = Pending
+        run: kubectl -n kubeflow get pods | tail -n +2 | grep Pending | awk '{print
+          $1}' | xargs -n1 kubectl -n kubeflow logs --all-containers=true --tail 100
+      - id: measurement-29
+        name: Record Measurement After Get logs from pods with status = Pending
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get logs from pods with status = Pending
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Get logs from pods with status = Failed
+        run: kubectl -n kubeflow get pods | tail -n +2 | grep Failed | awk '{print
+          $1}' | xargs -n1 kubectl -n kubeflow logs --all-containers=true --tail 100
+      - id: measurement-31
+        name: Record Measurement After Get logs from pods with status = Failed
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get logs from pods with status = Failed
+          task: get-measurement
+      - if: failure() || cancelled()
+        name: Get logs from pods with status = CrashLoopBackOff
+        run: kubectl -n kubeflow get pods | tail -n +2 | grep CrashLoopBackOff | awk
+          '{print $1}' | xargs -n1 kubectl -n kubeflow logs --all-containers=true
+          --tail 100
+      - id: measurement-33
+        name: Record Measurement After Get logs from pods with status = CrashLoopBackOff
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get logs from pods with status = CrashLoopBackOff
+          task: get-measurement
+      - if: always()
+        name: Delete EKS cluster
+        run: 'VERSION=${{ matrix.bundle_version }}
 
-      - name: Get logs from pods with status = Pending
-        run: kubectl -n kubeflow get pods | tail -n +2 | grep Pending | awk '{print $1}' | xargs -n1 kubectl -n kubeflow logs --all-containers=true --tail 100
-        if: failure() || cancelled()
-
-      - name: Get logs from pods with status = Failed
-        run: kubectl -n kubeflow get pods | tail -n +2 | grep Failed | awk '{print $1}' | xargs -n1 kubectl -n kubeflow logs --all-containers=true --tail 100
-        if: failure() || cancelled()
-
-      - name: Get logs from pods with status = CrashLoopBackOff
-        run: kubectl -n kubeflow get pods | tail -n +2 | grep CrashLoopBackOff | awk '{print $1}' | xargs -n1 kubectl -n kubeflow logs --all-containers=true --tail 100
-        if: failure() || cancelled()
-
-      - name: Delete EKS cluster
-        if: always()
-        run: |
-          VERSION=${{ matrix.bundle_version }}
           VERSION_WITHOUT_DOT="${VERSION//.}"
+
           eksctl delete cluster --region eu-central-1 --name=kubeflow-test-$VERSION_WITHOUT_DOT
 
-        # Clean up leftover CloudFormation stack when cluster creation fails unexpectedly
-      - name: Delete CloudFormation stack (if present)
-        if: always()
-        run: |
-          VERSION=${{ matrix.bundle_version }}
+          '
+      - id: measurement-35
+        name: Record Measurement After Delete EKS cluster
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Delete EKS cluster
+          task: get-measurement
+      - if: always()
+        name: Delete CloudFormation stack (if present)
+        run: 'VERSION=${{ matrix.bundle_version }}
+
           VERSION_WITHOUT_DOT="${VERSION//.}"
+
           aws cloudformation delete-stack --region eu-central-1 --stack-name eksctl-kubeflow-test-$VERSION_WITHOUT_DOT-cluster
 
-  delete-unattached-volumes:
-    if: always()
-    uses: ./.github/workflows/delete-aws-volumes.yaml
-    secrets: inherit
-    with:
-      region: eu-central-1
-    needs: [deploy-ckf-to-eks]
+          '
+      - id: measurement-37
+        name: Record Measurement After Delete CloudFormation stack (if present)
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Delete CloudFormation stack (if present)
+          task: get-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
+    strategy:
+      fail-fast: false
+      matrix:
+        bundle_version: ${{ fromJSON(needs.preprocess-input.outputs.processed_bundle_versions)
+          }}
+  preprocess-input:
+    outputs:
+      processed_bundle_versions: ${{ steps.process_bundle_versions.outputs.bundle_versions
+        }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install CLI tools
+        run: 'sudo snap install yq
+
+          '
+      - id: measurement-3
+        name: Record Measurement After Install CLI tools
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Install CLI tools
+          task: get-measurement
+      - id: process_bundle_versions
+        name: Process bundle versions
+        run: "if [[ \"${{ github.event_name }}\" == \"schedule\" ]]; then\n    # Use\
+          \ `tr` to remove new lines as a workaround to:\n    # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#multiline-strngs\n\
+          \    bundle_versions=$(yq '. | keys' .github/dependencies.yaml -o=json |\
+          \ tr -d '\\n')\n    echo \"bundle_versions=${bundle_versions}\"\n    echo\
+          \ \"bundle_versions=${bundle_versions}\" >> $GITHUB_OUTPUT\nelse\n    python\
+          \ scripts/gh-actions/parse_versions.py \"${{ inputs.bundle_version }}\"\n\
+          fi\n"
+      - id: measurement-5
+        name: Record Measurement After Process bundle versions
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Process bundle versions
+          task: get-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json

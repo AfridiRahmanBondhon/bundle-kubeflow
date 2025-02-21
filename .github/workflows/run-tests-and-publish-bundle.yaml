@@ -1,65 +1,86 @@
-name: Run bundle tests and publish to Charmhub
+name: run-tests-and-publish-bundle.yaml
 on:
-  workflow_call:
-    inputs:
-      release:
-        description: Bundle release to run tests on and publish to Charmhub
-        type: string
-        required: true
-    secrets:
-      CHARMCRAFT_CREDENTIALS:
-        required: true
-  workflow_dispatch:
-    inputs:
-      release:
-        description: Bundle release to run tests on and publish to Charmhub
-        type: string
-        required: true
-    secrets:
-      CHARMCRAFT_CREDENTIALS:
-        required: true
+  push:
+    branches:
+      - main
 
 jobs:
   get-release-inputs:
     name: Get required inputs
-    runs-on: ubuntu-22.04
     outputs:
       bundle_path: ${{ steps.bundle-path.outputs.bundle_path }}
       bundle_test_path: ${{ steps.bundle-test-path.outputs.bundle_test_path }}
+    runs-on: ubuntu-22.04
     steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
       - uses: actions/checkout@v3
-
-      - name: Get bundle path for ${{ inputs.release }}
-        id: bundle-path
+      - id: bundle-path
+        name: Get bundle path for ${{ inputs.release }}
         run: python scripts/get_bundle_path.py ${{ inputs.release }}
-
-      - name: Get bundle test path for ${{ inputs.release }}
-        id: bundle-test-path
+      - id: measurement-3
+        name: Record Measurement After Get bundle path for ${{ inputs.release }}
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get bundle path for ${{ inputs.release }}
+          task: get-measurement
+      - id: bundle-test-path
+        name: Get bundle test path for ${{ inputs.release }}
         run: python scripts/get_bundle_test_path.py ${{ inputs.release }}
-
-
-  # Commenting out since currently the tests are failing because of
-  # https://github.com/canonical/oidc-gatekeeper-operator/issues/112
-  #run-tests:
-    #name: Run tests
-    #needs: [get-release-inputs]
-    #uses: ./.github/workflows/full-bundle-tests.yaml
-    #with:
-      #bundle-test-path: ${{ needs.get-release-inputs.outputs.bundle_test_path }}
-      #bundle-source: --file ${{ needs.get-release-inputs.outputs.bundle_path }}/bundle.yaml
-
+      - id: measurement-5
+        name: Record Measurement After Get bundle test path for ${{ inputs.release
+          }}
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          label: Get bundle test path for ${{ inputs.release }}
+          task: get-measurement
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
   publish-bundle-for-releases-affected:
     name: Publish bundle
+    needs:
+      - get-release-inputs
     runs-on: ubuntu-22.04
-    # we'll need to add back `run-tests` in the `needs` part, once we bring it back
-    needs: [get-release-inputs]
     steps:
+      - name: Start Energy Measurement
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: start-measurement
       - uses: actions/checkout@v3
-
       - name: Publish bundle release ${{ inputs.release }}
         uses: canonical/charming-actions/upload-bundle@2.6.3
         with:
-          credentials: ${{ secrets.CHARMCRAFT_CREDENTIALS }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           bundle-path: ${{ needs.get-release-inputs.outputs.bundle_path }}
           channel: ${{ inputs.release }}
+          credentials: ${{ secrets.CHARMCRAFT_CREDENTIALS }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - id: display-measurement
+        name: Display Energy Results
+        uses: green-coding-solutions/eco-ci-energy-estimation@v4
+        with:
+          json-output: true
+          task: display-results
+      - name: Save Total Energy Consumption Data
+        run: echo '${{ steps.final-measurement.outputs.data-total-json }}' > total_energy_consumption.json
+      - name: Upload Energy Consumption Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: total-energy-consumption
+          path: total_energy_consumption.json
